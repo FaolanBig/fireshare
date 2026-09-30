@@ -703,21 +703,23 @@ def _get_encoder_candidates(use_gpu=False, encoder_preference='auto'):
         'video_codec': 'libx264',
         'audio_codec': 'aac',
         'audio_bitrate': '128k',
-        'extra_args': ['-preset', 'fast', '-crf', '23']
+        'extra_args': ['-preset', 'fast', '-crf', '23'],
+        'cap_bitrate': True,
     }
     av1_cpu = {
         'name': 'AV1 CPU',
         'video_codec': 'libsvtav1',
         'audio_codec': 'libopus',
         'audio_bitrate': '96k',
-        'extra_args': ['-preset', '6', '-crf', '30', '-b:v', '0', '-movflags', '+faststart']
+        'extra_args': ['-preset', '6', '-crf', '30', '-b:v', '0']
     }
     h264_nvenc = {
         'name': 'H.264 NVENC',
         'video_codec': 'h264_nvenc',
         'audio_codec': 'aac',
         'audio_bitrate': '128k',
-        'extra_args': ['-preset', 'p4', '-cq:v', '23']
+        'extra_args': ['-preset', 'p4', '-cq:v', '23'],
+        'cap_bitrate': True,
     }
     av1_nvenc = {
         'name': 'AV1 NVENC',
@@ -849,6 +851,16 @@ def run_ffmpeg_with_progress(cmd, total_duration, timeout_seconds=None, data_pat
     return process
 
 
+# Ceilings (maxrate, bufsize) for the H.264 transcodes, on top of their quality target.
+# Quality alone let a busy 1080p60 clip come out as heavy as its 1440p source, so moving
+# a viewer down to it did nothing for a slow connection. Set for 60 fps, so ordinary
+# footage stays under them and only the busiest is held back.
+TRANSCODE_BITRATE_CAPS = {
+    1080: ('8M', '16M'),
+    720: ('5M', '10M'),
+    480: ('2500k', '5M'),
+}
+
 def _build_transcode_command(video_path, out_path, height, encoder, input_decoder=None):
     """Build an ffmpeg command for transcoding with the given encoder."""
     cmd = ['ffmpeg', '-v', 'warning', '-stats', '-y']
@@ -860,9 +872,16 @@ def _build_transcode_command(video_path, out_path, height, encoder, input_decode
     
     if 'extra_args' in encoder:
         cmd.extend(encoder['extra_args'])
+
+    if encoder.get('cap_bitrate') and height in TRANSCODE_BITRATE_CAPS:
+        maxrate, bufsize = TRANSCODE_BITRATE_CAPS[height]
+        cmd.extend(['-maxrate', maxrate, '-bufsize', bufsize])
     
     cmd.extend(['-vf', f'scale=-2:{height}'])
     cmd.extend(['-c:a', encoder['audio_codec'], '-b:a', encoder.get('audio_bitrate', '128k')])
+    # The index goes at the front, so the player can start without first fetching the
+    # end of the file, and again every time it switches quality.
+    cmd.extend(['-movflags', '+faststart'])
     cmd.append(str(out_path))
     
     return cmd
