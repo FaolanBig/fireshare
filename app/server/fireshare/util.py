@@ -389,17 +389,24 @@ def create_video_crop(source_path, out_path, start_time=None, end_time=None):
     Uses -c copy (no re-encode) so this is fast even for large files.
     Returns True on success, False on failure.
     """
+    out_path = Path(out_path)
+    # Written beside the final path and renamed in on success. nginx serves the crop in
+    # place of the original as soon as it exists, and +faststart rewrites the whole file
+    # in a second pass, so a crop still being written must never appear under its name.
+    tmp_path = out_path.parent / (out_path.stem + '.tmp.mp4')
     cmd = ['ffmpeg', '-y']
     if start_time:
         cmd += ['-ss', str(start_time)]
     if end_time:
         cmd += ['-to', str(end_time)]
-    cmd += ['-i', str(source_path), '-c', 'copy', '-movflags', '+faststart', str(out_path)]
+    cmd += ['-i', str(source_path), '-c', 'copy', '-movflags', '+faststart', str(tmp_path)]
     logger.debug(f"$ {' '.join(cmd)}")
     result = sp.call(cmd)
     if result == 0:
+        os.replace(tmp_path, out_path)
         logger.info(f'Created crop {str(out_path)} (start={start_time}, end={end_time})')
     else:
+        tmp_path.unlink(missing_ok=True)
         logger.error(f'Failed to create crop {str(out_path)} (exit code {result})')
     return result == 0
 
@@ -430,19 +437,26 @@ def create_audio_extract(source_path, out_path):
 
 def create_poster(video_path, out_path, second=0):
     s = time.time()
+    out_path = Path(out_path)
+    # Rendered beside the final path and renamed in, so a request for the poster never
+    # reads one ffmpeg is still writing, and a failed attempt leaves the old one in place.
+    tmp_path = out_path.parent / (out_path.stem + '.tmp' + out_path.suffix)
     # -ss before -i uses fast keyframe seek, reliable even for large high-bitrate files
-    cmd = ['ffmpeg', '-v', 'quiet', '-y', '-ss', str(second), '-i', str(video_path), '-vframes', '1', '-vf', 'scale=iw:ih:force_original_aspect_ratio=decrease', str(out_path)]
+    cmd = ['ffmpeg', '-v', 'quiet', '-y', '-ss', str(second), '-i', str(video_path), '-vframes', '1', '-vf', 'scale=iw:ih:force_original_aspect_ratio=decrease', str(tmp_path)]
     logger.debug(f"$ {' '.join(cmd)}")
     ret = sp.call(cmd)
     e = time.time()
-    out_path = Path(out_path)
-    success = ret == 0 and out_path.exists() and out_path.stat().st_size > 0
+    success = ret == 0 and tmp_path.exists() and tmp_path.stat().st_size > 0
     if not success and second != 0:
         # Fall back to first frame if the seek position failed
         logger.warning(f"Poster generation failed at {second}s (exit {ret}), retrying with first frame")
         cmd[3] = '0'
         ret = sp.call(cmd)
-        success = ret == 0 and out_path.exists() and out_path.stat().st_size > 0
+        success = ret == 0 and tmp_path.exists() and tmp_path.stat().st_size > 0
+    if success:
+        os.replace(tmp_path, out_path)
+    else:
+        tmp_path.unlink(missing_ok=True)
     logger.debug(f'Generated poster {str(out_path)} in {e-s}s (success={success})')
     return success
 

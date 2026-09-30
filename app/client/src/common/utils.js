@@ -131,29 +131,44 @@ export const getPosterUrl = (videoId, cacheBuster) => {
 }
 
 /**
+ * A version for the URLs of a video's crop and the transcodes made from it. They are
+ * rebuilt under the same names whenever the video is re-cropped, so without one the
+ * browser plays the previous crop from its cache. Empty when the video is not cropped:
+ * its transcodes are then made from the original, which never changes.
+ * @param {Object} videoInfo - Video info object containing has_crop, start_time, end_time
+ * @returns {string} Version to pass to getVideoUrl
+ */
+export const getMediaVersion = (videoInfo) =>
+  videoInfo?.has_crop ? `${videoInfo.start_time ?? 0}-${videoInfo.end_time ?? 'end'}` : ''
+
+const withVersion = (url, version) =>
+  version ? `${url}${url.includes('?') ? '&' : '?'}v=${encodeURIComponent(version)}` : url
+
+/**
  * Gets the URL for a specific video quality
  * @param {string} videoId - The video ID
  * @param {string} quality - Quality ('720p', '1080p', or 'original')
  * @param {string} extension - Video file extension (e.g., '.mp4', '.mkv')
+ * @param {string} [version] - From getMediaVersion
  * @returns {string} Video URL
  */
-export const getVideoUrl = (videoId, quality, extension) => {
+export const getVideoUrl = (videoId, quality, extension, version) => {
   const URL = getUrl()
   const SERVED_BY = getServedBy()
 
   if (quality === '480p' || quality === '720p' || quality === '1080p') {
     if (SERVED_BY === 'nginx') {
-      return `${URL}/_content/derived/${videoId}/${videoId}-${quality}.mp4`
+      return withVersion(`${URL}/_content/derived/${videoId}/${videoId}-${quality}.mp4`, version)
     }
-    return `${URL}/api/video?id=${videoId}&quality=${quality}`
+    return withVersion(`${URL}/api/video?id=${videoId}&quality=${quality}`, version)
   }
 
   // Original quality
   if (SERVED_BY === 'nginx') {
     const videoPath = getVideoPath(videoId, extension)
-    return `${URL}/_content/video/${videoPath}`
+    return withVersion(`${URL}/_content/video/${videoPath}`, version)
   }
-  return `${URL}/api/video?id=${extension === '.mkv' ? `${videoId}&subid=1` : videoId}`
+  return withVersion(`${URL}/api/video?id=${extension === '.mkv' ? `${videoId}&subid=1` : videoId}`, version)
 }
 
 /**
@@ -285,16 +300,20 @@ export const getVideoSources = (videoId, videoInfo, extension, { forceOriginal =
   const has720p = videoInfo?.has_720p
   const has1080p = videoInfo?.has_1080p
   const hasCrop = videoInfo?.has_crop
+  const version = getMediaVersion(videoInfo)
 
   // forceOriginal bypasses the crop — used by the editor so admins see the full uncut video
   const sourceUrl =
     forceOriginal && SERVED_BY === 'nginx'
       ? `${URL}/_content/video-raw/${videoId}${extension}`
       : hasCrop
-        ? SERVED_BY === 'nginx'
-          ? `${URL}/_content/derived/${videoId}/${videoId}-cropped.mp4`
-          : `${URL}/api/video?id=${videoId}&quality=cropped`
-        : getVideoUrl(videoId, 'original', extension)
+        ? withVersion(
+            SERVED_BY === 'nginx'
+              ? `${URL}/_content/derived/${videoId}/${videoId}-cropped.mp4`
+              : `${URL}/api/video?id=${videoId}&quality=cropped`,
+            version,
+          )
+        : getVideoUrl(videoId, 'original', extension, version)
 
   sources.push({
     src: sourceUrl,
@@ -306,7 +325,7 @@ export const getVideoSources = (videoId, videoInfo, extension, { forceOriginal =
 
   if (has1080p) {
     sources.push({
-      src: getVideoUrl(videoId, '1080p', extension),
+      src: getVideoUrl(videoId, '1080p', extension, version),
       type: 'video/mp4',
       label: '1080p',
       media: getTranscodeMedia(videoInfo, 1080),
@@ -315,7 +334,7 @@ export const getVideoSources = (videoId, videoInfo, extension, { forceOriginal =
 
   if (has720p) {
     sources.push({
-      src: getVideoUrl(videoId, '720p', extension),
+      src: getVideoUrl(videoId, '720p', extension, version),
       type: 'video/mp4',
       label: '720p',
       media: getTranscodeMedia(videoInfo, 720),
@@ -324,7 +343,7 @@ export const getVideoSources = (videoId, videoInfo, extension, { forceOriginal =
 
   if (has480p) {
     sources.push({
-      src: getVideoUrl(videoId, '480p', extension),
+      src: getVideoUrl(videoId, '480p', extension, version),
       type: 'video/mp4',
       label: '480p',
       media: getTranscodeMedia(videoInfo, 480),
