@@ -1,4 +1,7 @@
 import os
+import fcntl
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 import json
 import subprocess as sp
@@ -87,6 +90,58 @@ def remove_lock(path: Path, filename: str = "fireshare.lock"):
     if lockfile.exists():
         logger.debug(f"A lockfile has been removed at {str(lockfile)}")
         os.remove(lockfile)
+
+
+_VIDEO_LOCK_DIR = Path(tempfile.gettempdir()) / "fireshare-video-locks"
+
+def _open_video_lock_file(video_id):
+    # The web process and a `fireshare` command run by hand through `docker exec` are
+    # different users, so the directory is left open to everyone, like /tmp itself.
+    try:
+        _VIDEO_LOCK_DIR.mkdir()
+        os.chmod(_VIDEO_LOCK_DIR, 0o1777)
+    except FileExistsError:
+        pass
+    path = _VIDEO_LOCK_DIR / f"{video_id}.lock"
+    # Read-only is enough for flock. O_CREAT only ever runs with O_EXCL, because Linux
+    # refuses O_CREAT on another user's file in a sticky directory (protected_regular).
+    try:
+        return os.open(path, os.O_RDONLY)
+    except FileNotFoundError:
+        pass
+    try:
+        return os.open(path, os.O_RDONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        return os.open(path, os.O_RDONLY)
+
+@contextmanager
+def video_lock(video_id, wait=True):
+    """
+    Hold the lock on one video's crop and transcodes for the length of the block.
+
+    Saving a crop rebuilds them in a thread of the web process while the scheduled
+    scan transcodes in a process of its own, and the two used to write the same files
+    at once. Yields True once the lock is held, or False straight away when wait is
+    False and someone else holds it. flock is released by the kernel when its holder
+    exits, so a crash can never leave a video locked. The files live in the local
+    temp dir because every process that takes the lock runs in the same container.
+    """
+    try:
+        fd = _open_video_lock_file(video_id)
+    except OSError as ex:
+        logger.warning(f"Could not open the lock for video {video_id}, continuing without it: {ex}")
+        yield True
+        return
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            held = False
+        else:
+            held = True
+        yield held
+    finally:
+        os.close(fd)  # releases the lock
 
 
 # Transcoding status file functions
