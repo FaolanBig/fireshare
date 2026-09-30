@@ -62,6 +62,15 @@ def _reset_derived_videos(video_id, video_info, derived_dir):
     db.session.commit()
 
 
+def _transcoding_settings(paths):
+    """The transcoding section of config.json, as the scheduled scan reads it."""
+    config_path = paths['data'] / 'config.json'
+    if not config_path.exists():
+        return {}
+    with open(config_path) as f:
+        return json.load(f).get('transcoding', {})
+
+
 def _wanted_heights(video_info, paths, had_480p, had_720p, had_1080p):
     """
     The transcodes to make once a crop is saved or cleared: the ones the video had,
@@ -71,11 +80,7 @@ def _wanted_heights(video_info, paths, had_480p, had_720p, had_1080p):
     """
     heights = {h for h, had in ((480, had_480p), (720, had_720p), (1080, had_1080p)) if had}
     if current_app.config.get('ENABLE_TRANSCODING'):
-        config_path = paths['data'] / 'config.json'
-        transcoding = {}
-        if config_path.exists():
-            with open(config_path) as f:
-                transcoding = json.load(f).get('transcoding', {})
+        transcoding = _transcoding_settings(paths)
         if transcoding.get('auto_transcode', True):
             # Same rule as the scan: only heights below the source's, or all of them
             # when its height is unknown.
@@ -132,6 +137,10 @@ def _rebuild_derived_async(video, paths, heights, start_time=None, end_time=None
     original_path = paths["processed"] / "video_links" / f"{video_id}{video.extension}"
     cropped_path = derived_dir / f"{video_id}-cropped.mp4"
     app = current_app._get_current_object()
+    # The encoder the scheduled scan uses. These were left at their defaults, so a crop's
+    # transcodes always ran on the CPU, even on a server set up for NVENC.
+    use_gpu = current_app.config.get('TRANSCODE_GPU', False)
+    encoder_preference = _transcoding_settings(paths).get('encoder_preference', 'auto')
 
     def current_info():
         """The video's info, or None once a newer save has replaced this crop."""
@@ -174,7 +183,9 @@ def _rebuild_derived_async(video, paths, heights, start_time=None, end_time=None
             for height in heights:
                 if not still_current():
                     return
-                success, _ = util.transcode_video_quality(source_path, derived_dir / f"{video_id}-{height}p.mp4", height)
+                success, _ = util.transcode_video_quality(
+                    source_path, derived_dir / f"{video_id}-{height}p.mp4", height, use_gpu, None, encoder_preference
+                )
                 with app.app_context():
                     vi = current_info()
                     if not vi:
