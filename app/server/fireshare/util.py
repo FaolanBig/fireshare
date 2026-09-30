@@ -203,6 +203,26 @@ def get_video_duration(path):
         logger.debug(f'Could not extract video duration: {ex}')
     return None
 
+def get_video_framerate(path):
+    """
+    Get the average frame rate of a video file's first video stream.
+
+    Returns:
+        float: Frames per second, or None if unable to determine
+    """
+    try:
+        cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-select_streams', 'v:0',
+               '-show_entries', 'stream=avg_frame_rate,r_frame_rate', str(path)]
+        logger.debug(f"$ {' '.join(cmd)}")
+        stream = json.loads(sp.check_output(cmd).decode('utf-8'))['streams'][0]
+        for key in ('avg_frame_rate', 'r_frame_rate'):
+            num, _, den = stream.get(key, '').partition('/')
+            if num and den and float(den) > 0 and float(num) > 0:
+                return float(num) / float(den)
+    except Exception as ex:
+        logger.debug(f'Could not extract video frame rate: {ex}')
+    return None
+
 def validate_video_file(path, timeout=30):
     """
     Validate that a video file is not corrupt and can be decoded.
@@ -853,15 +873,19 @@ def run_ffmpeg_with_progress(cmd, total_duration, timeout_seconds=None, data_pat
 
 # Ceilings (maxrate, bufsize) for the H.264 transcodes, on top of their quality target.
 # Quality alone let a busy 1080p60 clip come out as heavy as its 1440p source, so moving
-# a viewer down to it did nothing for a slow connection. Set for 60 fps, so ordinary
-# footage stays under them and only the busiest is held back.
+# a viewer down to it did nothing for a slow connection. These are YouTube's recommended
+# upload bitrates, which it treats as good enough to re-encode from, so ordinary footage
+# stays under them and only the busiest is held back. Past 30 fps the same bitrate is
+# spread over up to twice the frames, so those get the higher set, as does an unknown
+# frame rate.
 TRANSCODE_BITRATE_CAPS = {
-    1080: ('8M', '16M'),
-    720: ('5M', '10M'),
-    480: ('2500k', '5M'),
+    #      up to 30 fps       above 30 fps
+    1080: (('8M', '16M'),    ('12M', '24M')),
+    720:  (('5M', '10M'),    ('7500k', '15M')),
+    480:  (('2500k', '5M'),  ('4M', '8M')),
 }
 
-def _build_transcode_command(video_path, out_path, height, encoder, input_decoder=None):
+def _build_transcode_command(video_path, out_path, height, encoder, input_decoder=None, framerate=None):
     """Build an ffmpeg command for transcoding with the given encoder."""
     cmd = ['ffmpeg', '-v', 'warning', '-stats', '-y']
     if input_decoder:
@@ -874,7 +898,9 @@ def _build_transcode_command(video_path, out_path, height, encoder, input_decode
         cmd.extend(encoder['extra_args'])
 
     if encoder.get('cap_bitrate') and height in TRANSCODE_BITRATE_CAPS:
-        maxrate, bufsize = TRANSCODE_BITRATE_CAPS[height]
+        # 31 so that 29.97 fps, and 30 fps recordings a little variable, count as 30
+        high_fps = framerate is None or framerate > 31
+        maxrate, bufsize = TRANSCODE_BITRATE_CAPS[height][1 if high_fps else 0]
         cmd.extend(['-maxrate', maxrate, '-bufsize', bufsize])
     
     cmd.extend(['-vf', f'scale=-2:{height}'])
@@ -927,6 +953,8 @@ def transcode_video_quality(video_path, out_path, height, use_gpu=False, timeout
 
     # Get video duration for progress logging
     total_duration = get_video_duration(video_path) or 0
+    # Picks which set of bitrate ceilings applies
+    framerate = get_video_framerate(video_path)
 
     # Calculate smart timeout based on video duration if not provided
     if timeout_seconds is None:
@@ -958,7 +986,7 @@ def transcode_video_quality(video_path, out_path, height, use_gpu=False, timeout
 
         # Build ffmpeg command using the cached encoder
         logger.info(f"Transcoding video to {height}p using {encoder['name']}")
-        cmd = _build_transcode_command(video_path, tmp_path, height, encoder, input_decoder=preferred_decoder)
+        cmd = _build_transcode_command(video_path, tmp_path, height, encoder, input_decoder=preferred_decoder, framerate=framerate)
 
         logger.debug(f"$: {' '.join(cmd)}")
 
@@ -1104,7 +1132,7 @@ def transcode_video_quality(video_path, out_path, height, use_gpu=False, timeout
         logger.debug(f"Trying {encoder['name']}...")
 
         # Build ffmpeg command targeting the temp path
-        cmd = _build_transcode_command(video_path, tmp_path, height, encoder, input_decoder=preferred_decoder)
+        cmd = _build_transcode_command(video_path, tmp_path, height, encoder, input_decoder=preferred_decoder, framerate=framerate)
 
         logger.debug(f"$: {' '.join(cmd)}")
 
